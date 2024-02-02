@@ -102,6 +102,65 @@ $updateToF64 = Invoke-RestMethod -Uri ("https://management.azure.com/subscriptio
 $capacity=((Invoke-AzRestMethod -Path "/subscriptions/$s/resourceGroups/$g/providers/Microsoft.Fabric/capacities?api-version=2022-07-01-preview" -Method Get).Content | ConvertFrom-Json).value
 
 
+#This code segment provides ability to set capacity administrators using Security Group
+#NOTE: at this point in time the Fabric capacity Az API doesn't accept Group object types  
+
+#HELPER FUNCTION; must be compiled; afterward execute code below line by line to better understand the flow
+#recursively retreives nested group members UPNs; output may contain duplicates
+#source of this extended function: https://xenit.se/blog/2017/11/23/recursively-search-azure-ad-group-members/
+Function Get-RecursiveAzAdGroupMemberUsers{
+[cmdletbinding()]
+param(
+   [parameter(Mandatory=$True,ValueFromPipeline=$true)]
+   $AzureGroup
+)
+    begin{        
+        #TODO: add pre-requisits checks
+    }
+    process {
+        #Write-Verbose -Message "Enumerating $($AzureGroup.DisplayName)"
+        $Members = Get-AzADGroupMember -ObjectId $AzureGroup.Id
+        $UserMembers = $Members | Where-Object{$_.ObjectType -eq 'User'}
+        If($Members | Where-Object{$_.ObjectType -eq 'Group'}){
+            $UserMembers += $Members | Where-Object{$_.ObjectType -eq 'Group'} | ForEach-Object{ Get-RecursiveAzAdGroupMemberUsers -AzureGroup $_}            
+        }
+    }
+    end {
+        
+        Return $UserMembers
+    }
+}
+
+$allUsers=Get-azADGroup -ObjectId [YOUR SG ObjectID] | Get-RecursiveAzAdGroupMemberUsers 
+
+#constructing array in format accepted by Fabric Az REST API
+$admins=@{
+    properties = @{
+        administration = @{
+            members = @()
+        }
+    }
+} 
+
+#constructing array of unique group member UPNs
+foreach ($user in  $allUsers)
+{
+    #check for duplicates is optional - Azure API handles them internally
+    #however better for performance if array is large and has many duplicates    
+    if (-not $admins.properties.administration.members.Contains($user.UserPrincipalName))
+    {
+        $admins.properties.administration.members+=$user.UserPrincipalName
+    }
+}
+
+#converting array to JSON string format accepted by az API
+$admins = $admins | ConvertTo-Json -Depth 3 -Compress
+
+#It is better to use Invoke-AzRestMethod in this case since parsing of SG requires native Az PS commandlet execution; header related overhead is not required
+#$updateAdminsSG = Invoke-RestMethod -Uri ("https://management.azure.com/subscriptions/$s/resourceGroups/$g/providers/Microsoft.Fabric/capacities/"+$c+"?api-version=2022-07-01-preview") -Body $admins -Headers $headers -Method Patch
+$updateAdminsSG = Invoke-AzRestMethod -Path ("/subscriptions/$s/resourceGroups/$g/providers/Microsoft.Fabric/capacities/"+$c+"?api-version=2022-07-01-preview") -Payload $admins -Method PATCH
+
+
 #TODO: add routine to add alias to all capacities in resource group
 
 #Dynamic array building guidance section
